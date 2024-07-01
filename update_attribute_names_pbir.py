@@ -107,11 +107,6 @@ def update_entity(data, table_map):
                         if "name" in entity and entity["name"] in table_map:
                             entity["name"] = table_map[entity["name"]]
                             updated = True
-                        if "expression" in entity and isinstance(entity["expression"], str):
-                            original_expression = entity["expression"]
-                            entity["expression"] = update_dax_expression(original_expression, table_map=table_map)
-                            if entity["expression"] != original_expression:
-                                updated = True
                         traverse_and_update(entity)
                 elif key == "expression" and isinstance(value, str):
                     original_expression = value
