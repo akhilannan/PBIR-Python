@@ -3,6 +3,7 @@ import json
 import os
 import re
 
+
 def load_csv_mapping(csv_path):
     """
     Load a CSV file and return a list of dictionaries mapping from old (entity, column) pairs
@@ -27,6 +28,7 @@ def load_csv_mapping(csv_path):
             if old_tbl and (new_tbl or (old_col and new_col)):
                 mappings.append(row)
     return mappings
+
 
 def update_dax_expression(expression, table_map=None, column_map=None):
     """
@@ -67,12 +69,12 @@ def update_dax_expression(expression, table_map=None, column_map=None):
             table_name = table_part.strip("'")
             
             if (table_name, column_name) in column_map:
-                new_table, new_column = column_map[(table_name, column_name)]
+                new_column = column_map[(table_name, column_name)]
                 # Preserve original quoting style if no spaces in new table name
-                if ' ' in new_table or table_part.startswith("'"):
-                    table_part = f"'{new_table}'"
+                if ' ' in table_name or table_part.startswith("'"):
+                    table_part = f"'{table_name}'"
                 else:
-                    table_part = new_table
+                    table_part = table_name
                 return f"{table_part}[{new_column}]"
             return full_match
 
@@ -81,6 +83,7 @@ def update_dax_expression(expression, table_map=None, column_map=None):
         expression = pattern.sub(replace_column_name, expression)
 
     return expression
+
 
 def update_entity(data, table_map):
     """
@@ -122,6 +125,7 @@ def update_entity(data, table_map):
     traverse_and_update(data)
     return updated
 
+
 def update_property(data, column_map):
     """
     Update the "Property" fields in the JSON data based on the column_map and updated table names.
@@ -145,8 +149,8 @@ def update_property(data, column_map):
                     property = value.get("Property")
                     if entity and property:
                         if (entity, property) in column_map:
-                            new_entity, new_property = column_map[(entity, property)]
-                            value["Expression"]["SourceRef"]["Entity"] = new_entity
+                            new_property = column_map[(entity, property)]
+                            value["Expression"]["SourceRef"]["Entity"] = entity
                             value["Property"] = new_property
                             updated = True
                 elif key == "expression" and isinstance(value, str):
@@ -163,7 +167,7 @@ def update_property(data, column_map):
                             property = column.get("Property")
                             if property:
                                 if (from_entity, property) in column_map:
-                                    new_entity, new_property = column_map[(from_entity, property)]
+                                    new_property = column_map[(from_entity, property)]
                                     column["Property"] = new_property
                                     updated = True
                 else:
@@ -175,6 +179,7 @@ def update_property(data, column_map):
     traverse_and_update(data)
     return updated
 
+
 def process_json_file(file_path, table_map, column_map):
     """
     Process a single JSON file, updating its content based on the table_map and column_map.
@@ -182,17 +187,25 @@ def process_json_file(file_path, table_map, column_map):
     Parameters:
     - file_path: Path to the JSON file.
     - table_map: A dictionary mapping old table names to new table names.
-    - column_map: A dictionary mapping old (table, column) pairs to new (table, column) pairs.
+    - column_map: A dictionary mapping old (table, column) pairs to new column names.
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as json_file:
             data = json.load(json_file)
-        entity_updated = update_entity(data, table_map)
-        if entity_updated:
-            print(f"Entity updated in file: {file_path}")
-        property_updated = update_property(data, column_map)
-        if property_updated:
-            print(f"Property updated in file: {file_path}")
+        
+        entity_updated = False
+        property_updated = False
+
+        if table_map:
+            entity_updated = update_entity(data, table_map)
+            if entity_updated:
+                print(f"Entity updated in file: {file_path}")
+
+        if column_map:
+            property_updated = update_property(data, column_map)
+            if property_updated:
+                print(f"Property updated in file: {file_path}")
+
         if entity_updated or property_updated:
             with open(file_path, 'w', encoding='utf-8') as json_file:
                 json.dump(data, json_file, indent=2)
@@ -200,6 +213,7 @@ def process_json_file(file_path, table_map, column_map):
         print(f"Error: Unable to parse JSON in file: {file_path}")
     except IOError as e:
         print(f"Error: Unable to read or write file: {file_path}. {str(e)}")
+
 
 def update_json_files_in_directory(directory_path, csv_path):
     """
@@ -221,7 +235,7 @@ def update_json_files_in_directory(directory_path, csv_path):
                 table_map[old_tbl] = new_tbl
             if old_col and new_col:
                 effective_tbl = table_map.get(old_tbl, old_tbl)
-                column_map[(effective_tbl, old_col)] = (effective_tbl, new_col)
+                column_map[(effective_tbl, old_col)] = new_col
         
         for root, _, files in os.walk(directory_path):
             for file in files:
@@ -230,6 +244,7 @@ def update_json_files_in_directory(directory_path, csv_path):
                     process_json_file(file_path, table_map, column_map)
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+
 
 # Example usage:
 # update_json_files_in_directory('path_to_pbir_directory', 'path_to_csv_file')
