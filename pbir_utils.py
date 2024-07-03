@@ -246,5 +246,172 @@ def update_json_files_in_directory(directory_path, csv_path):
         print(f"An error occurred: {str(e)}")
 
 
-# Example usage:
-# update_json_files_in_directory('path_to_pbir_directory', 'path_to_csv_file')
+def extract_report_name(json_file_path):
+    """
+    Extracts the report name from the JSON file path.
+
+    Args:
+        json_file_path (str): The file path to the JSON file.
+
+    Returns:
+        str: The extracted report name if found, otherwise "NA".
+    """
+    return next((component[:-7] for component in reversed(json_file_path.split(os.sep))
+                 if component.endswith('.Report')), "NA")
+
+
+def extract_active_section(bookmark_json_path):
+    """
+    Extracts the active section from the bookmarks JSON file.
+
+    Args:
+        bookmark_json_path (str): The file path to the bookmarks JSON file.
+
+    Returns:
+        str: The active section if found, otherwise an empty string.
+    """
+    if "bookmarks" in bookmark_json_path:
+        try:
+            with open(bookmark_json_path, 'r', encoding='utf-8') as file:
+                return json.load(file).get("explorationState", {}).get("activeSection", "")
+        except (IOError, json.JSONDecodeError):
+            return ""
+    else:
+        parts = bookmark_json_path.split(os.sep)
+        return parts[parts.index("pages") + 1] if "pages" in parts else ""
+
+
+def extract_page_name(json_path):
+    """
+    Extracts the page name from the JSON file path.
+
+    Args:
+        json_path (str): The file path to the JSON file.
+
+    Returns:
+        str: The extracted page name if found, otherwise "NA".
+    """
+    active_section = extract_active_section(json_path)
+    if not active_section:
+        return "NA"
+    base_path = json_path.split("definition")[0]
+    page_json_path = os.path.join(base_path, "definition", "pages", active_section, "page.json")
+    try:
+        with open(page_json_path, "r", encoding='utf-8') as file:
+            return json.load(file).get("displayName", "NA")
+    except (IOError, json.JSONDecodeError):
+        return "NA"
+
+
+def extract_json_values_to_csv(directory_path, csv_output_path):
+    """
+    Extracts values from JSON files in a directory and writes them to a CSV file.
+
+    Args:
+        directory_path (str): The directory path containing JSON files.
+        csv_output_path (str): The output path for the CSV file.
+
+    Returns:
+        None
+    """
+    
+    def traverse_json(data, context=None):
+        """
+        Recursively traverses the JSON data to extract specific values.
+
+        Args:
+            data (dict or list): The JSON data to traverse.
+            context (str): The context in which the value is used.
+
+        Yields:
+            tuple: Extracted values in the form of (table, column, context, expression).
+        """
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key == "Entity":
+                    yield (value, None, context, None)
+                elif key == "Property":
+                    yield (None, value, context, None)
+                elif key == "visual":
+                    yield from traverse_json(value, value.get("visualType", "visual"))
+                elif key == "pageBinding":
+                    yield from traverse_json(value, value.get("type", "Drillthrough"))
+                elif key == "filterConfig":
+                    yield from traverse_json(value, "Filters")
+                elif key == "explorationState":
+                    yield from traverse_json(value, "Bookmarks")
+                elif key == "entities":
+                    for entity in value:
+                        table_name = entity.get("name")
+                        for measure in entity.get("measures", []):
+                            yield (table_name, measure.get("name"), context, measure.get("expression", None))
+                else:
+                    yield from traverse_json(value, context)
+        elif isinstance(data, list):
+            for item in data:
+                yield from traverse_json(item, context)
+
+    # Extract data from all json files in a directory
+    all_rows = []
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith('.json'):
+                json_file_path = os.path.join(root, file)
+                report_name = extract_report_name(json_file_path)
+                page_name = extract_page_name(json_file_path) or "NA"
+                try:
+                    with open(json_file_path, 'r', encoding='utf-8') as file:
+                        data = json.load(file)
+                        for table, column, used_in, expression in traverse_json(data):
+                            all_rows.append({"Report": report_name, "Page": page_name, "Table": table, "Column or Measure": column, "Expression": expression, "Used In": used_in})
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Error: Unable to process file {json_file_path}: {str(e)}")
+
+    # Separate rows based on whether they have an "expression" value
+    rows_with_expression = [row for row in all_rows if row['Expression'] is not None]
+    rows_without_expression = [row for row in all_rows if row['Expression'] is None]
+
+    # Process rows without expression (now potentially updated with expressions)
+    reformatted_rows = [
+        {
+            "Report": rows_without_expression[i]["Report"],
+            "Page": rows_without_expression[i]["Page"],
+            "Table": rows_without_expression[i]["Table"],
+            "Column or Measure": rows_without_expression[i + 1]["Column or Measure"],
+            "Expression": None,
+            "Used In": rows_without_expression[i]["Used In"]
+        }
+        for i in range(0, len(rows_without_expression), 2)
+        if i + 1 < len(rows_without_expression)
+    ]
+
+    # Update rows without expression with expressions from rows with expression
+    for row_without in reformatted_rows:
+        for row_with in rows_with_expression:
+            if (row_without['Report'] == row_with['Report'] and
+                row_without['Table'] == row_with['Table'] and
+                row_without['Column or Measure'] == row_with['Column or Measure']):
+                row_without['Expression'] = row_with['Expression']
+                break  # Stop looking once a match is found
+
+    # Ensure rows_with_expression that were not matched are added back
+    final_rows = reformatted_rows + [row for row in rows_with_expression if not any(
+        row['Report'] == r['Report'] and
+        row['Table'] == r['Table'] and
+        row['Column or Measure'] == r['Column or Measure'] for r in reformatted_rows)]
+    
+    # Extract distinct rows
+    unique_rows = []
+    seen = set()
+    for row in final_rows:
+        row_tuple = (row['Report'], row['Page'], row['Table'], row['Column or Measure'], row['Expression'], row['Used In'])
+        if row_tuple not in seen:
+            unique_rows.append(row)
+            seen.add(row_tuple)
+    
+    # Write to csv
+    with open(csv_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['Report', 'Page', 'Table', 'Column or Measure', 'Expression', 'Used In']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(unique_rows)
