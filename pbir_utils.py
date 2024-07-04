@@ -180,12 +180,15 @@ def update_property(data, column_map):
     return updated
 
 
-def process_json_file(file_path, table_map, column_map):
+def update_pbir_component(file_path, table_map, column_map):
     """
-    Process a single JSON file, updating its content based on the table_map and column_map.
+    Update a single component within a Power BI Enhanced Report Format (PBIR) structure.
+    
+    This function processes a single JSON file representing a PBIR component (e.g., visual, page, bookmark)
+    and updates table and column references based on the provided mappings.
     
     Parameters:
-    - file_path: Path to the JSON file.
+    - file_path: Path to the PBIR component JSON file.
     - table_map: A dictionary mapping old table names to new table names.
     - column_map: A dictionary mapping old (table, column) pairs to new column names.
     """
@@ -215,13 +218,17 @@ def process_json_file(file_path, table_map, column_map):
         print(f"Error: Unable to read or write file: {file_path}. {str(e)}")
 
 
-def update_json_files_in_directory(directory_path, csv_path):
+def batch_update_pbir_project(directory_path, csv_path):
     """
-    Update all JSON files in a directory based on a CSV mapping.
+    Perform a batch update on all components of a Power BI Enhanced Report Format (PBIR) project.
+    
+    This function processes all JSON files in a PBIR project directory, updating table and column
+    references based on a CSV mapping file. It's designed to work with the PBIR folder structure,
+    which separates report components into individual files.
     
     Parameters:
-    - directory_path: Path to the directory containing JSON files.
-    - csv_path: Path to the CSV file with the mapping.
+    - directory_path: Path to the root directory of the PBIR project (usually the 'definition' folder).
+    - csv_path: Path to the CSV file with the mapping of old and new table/column names.
     """
     try:
         mappings = load_csv_mapping(csv_path)
@@ -241,7 +248,7 @@ def update_json_files_in_directory(directory_path, csv_path):
             for file in files:
                 if file.endswith('.json'):
                     file_path = os.path.join(root, file)
-                    process_json_file(file_path, table_map, column_map)
+                    update_pbir_component(file_path, table_map, column_map)
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
@@ -303,9 +310,132 @@ def extract_page_name(json_path):
         return "NA"
 
 
-def extract_power_bi_metadata_to_csv(directory_path, csv_output_path):
+def traverse_pbir_json_structure(data, context=None):
     """
-    Extracts metadata from Power BI report JSON files (PBIR) in a directory and writes it to a CSV file.
+    Recursively traverses the Power BI Enhanced Report Format (PBIR) JSON structure to extract specific metadata.
+
+    This function navigates through the complex PBIR JSON structure, identifying and extracting
+    key metadata elements such as entities, properties, visuals, filters, bookmarks, and measures.
+    It handles various PBIR-specific components and contexts, providing a comprehensive
+    extraction of report structure and data model information.
+
+    Args:
+        data (dict or list): The PBIR JSON data to traverse.
+        context (str, optional): The current context within the PBIR structure (e.g., visual type, filter, bookmark).
+
+    Yields:
+        tuple: Extracted metadata in the form of (table, column, context, expression).
+               - table: The name of the table (if applicable)
+               - column: The name of the column or measure
+               - context: The context in which the element is used (e.g., visual type, filter, bookmark)
+               - expression: The DAX expression for measures (if applicable)
+    """
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "Entity":
+                yield (value, None, context, None)
+            elif key == "Property":
+                yield (None, value, context, None)
+            elif key == "visual":
+                yield from traverse_pbir_json_structure(value, value.get("visualType", "visual"))
+            elif key == "pageBinding":
+                yield from traverse_pbir_json_structure(value, value.get("type", "Drillthrough"))
+            elif key == "filterConfig":
+                yield from traverse_pbir_json_structure(value, "Filters")
+            elif key == "explorationState":
+                yield from traverse_pbir_json_structure(value, "Bookmarks")
+            elif key == "entities":
+                for entity in value:
+                    table_name = entity.get("name")
+                    for measure in entity.get("measures", []):
+                        yield (table_name, measure.get("name"), context, measure.get("expression", None))
+            else:
+                yield from traverse_pbir_json_structure(value, context)
+    elif isinstance(data, list):
+        for item in data:
+            yield from traverse_pbir_json_structure(item, context)
+
+
+def extract_pbir_component_metadata(directory_path):
+    """
+    Extracts detailed metadata from all Power BI Enhanced Report Format (PBIR) component files in the specified directory.
+
+    This function traverses through all JSON files in the PBIR project structure, extracting key metadata
+    such as report name, page name, table names, column/measure details, DAX expressions, and usage information.
+    It processes both visual components and data model elements, consolidating the information into a structured format.
+
+    Args:
+        directory_path (str): The root directory path containing PBIR component JSON files.
+
+    Returns:
+        list: A list of dictionaries, each representing a unique metadata entry with fields:
+            Report, Page, Table, Column or Measure, Expression, and Used In.
+    """
+
+    # Extract data from all json files in a directory
+    all_rows = []
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith('.json'):
+                json_file_path = os.path.join(root, file)
+                report_name = extract_report_name(json_file_path)
+                page_name = extract_page_name(json_file_path) or "NA"
+                try:
+                    with open(json_file_path, 'r', encoding='utf-8') as file:
+                        data = json.load(file)
+                        for table, column, used_in, expression in traverse_pbir_json_structure(data):
+                            all_rows.append({"Report": report_name, "Page": page_name, "Table": table, "Column or Measure": column, "Expression": expression, "Used In": used_in})
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Error: Unable to process file {json_file_path}: {str(e)}")
+
+    # Separate rows based on whether they have an "expression" value
+    rows_with_expression = [row for row in all_rows if row['Expression'] is not None]
+    rows_without_expression = [row for row in all_rows if row['Expression'] is None]
+
+    # This step is done to ensure we get table and respective column in single row
+    reformatted_rows = [
+        {
+            "Report": rows_without_expression[i]["Report"],
+            "Page": rows_without_expression[i]["Page"],
+            "Table": rows_without_expression[i]["Table"],
+            "Column or Measure": rows_without_expression[i + 1]["Column or Measure"],
+            "Expression": None,
+            "Used In": rows_without_expression[i]["Used In"]
+        }
+        for i in range(0, len(rows_without_expression), 2)
+        if i + 1 < len(rows_without_expression)
+    ]
+
+    # This step ensures we add expression to the reformatted_rows based on a join to rows_with_expression
+    for row_without in reformatted_rows:
+        for row_with in rows_with_expression:
+            if (row_without['Report'] == row_with['Report'] and
+                row_without['Table'] == row_with['Table'] and
+                row_without['Column or Measure'] == row_with['Column or Measure']):
+                row_without['Expression'] = row_with['Expression']
+                break  # Stop looking once a match is found
+
+    # Ensure rows_with_expression that were not used anywhere are added to reformatted_rows
+    final_rows = reformatted_rows + [row for row in rows_with_expression if not any(
+        row['Report'] == r['Report'] and
+        row['Table'] == r['Table'] and
+        row['Column or Measure'] == r['Column or Measure'] for r in reformatted_rows)]
+    
+    # Extract distinct rows
+    unique_rows = []
+    seen = set()
+    for row in final_rows:
+        row_tuple = (row['Report'], row['Page'], row['Table'], row['Column or Measure'], row['Expression'], row['Used In'])
+        if row_tuple not in seen:
+            unique_rows.append(row)
+            seen.add(row_tuple)
+    
+    return unique_rows
+
+
+def export_pbir_metadata_to_csv(directory_path, csv_output_path):
+    """
+    Exports the extracted Power BI Enhanced Report Format (PBIR) metadata to a CSV file.
 
     This function processes JSON files representing Power BI reports, extracting information about
     tables, columns, measures, their expressions, and where they are used within the report. It
@@ -313,7 +443,7 @@ def extract_power_bi_metadata_to_csv(directory_path, csv_output_path):
     into a single CSV output.
 
     Args:
-        directory_path (str): The directory path containing Power BI report JSON files.
+        directory_path (str): The directory path containing PBIR JSON files.
         csv_output_path (str): The output path for the CSV file containing the extracted metadata.
 
     Returns:
@@ -328,128 +458,9 @@ def extract_power_bi_metadata_to_csv(directory_path, csv_output_path):
     - Used In: Context where the item is used (e.g., visual, Drillthrough, Filters, Bookmarks)
     """
     
-    def traverse_json(data, context=None):
-        """
-        Recursively traverses the JSON data to extract specific values.
-
-        Args:
-            data (dict or list): The JSON data to traverse.
-            context (str): The context in which the value is used.
-
-        Yields:
-            tuple: Extracted values in the form of (table, column, context, expression).
-        """
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key == "Entity":
-                    yield (value, None, context, None)
-                elif key == "Property":
-                    yield (None, value, context, None)
-                elif key == "visual":
-                    yield from traverse_json(value, value.get("visualType", "visual"))
-                elif key == "pageBinding":
-                    yield from traverse_json(value, value.get("type", "Drillthrough"))
-                elif key == "filterConfig":
-                    yield from traverse_json(value, "Filters")
-                elif key == "explorationState":
-                    yield from traverse_json(value, "Bookmarks")
-                elif key == "entities":
-                    for entity in value:
-                        table_name = entity.get("name")
-                        for measure in entity.get("measures", []):
-                            yield (table_name, measure.get("name"), context, measure.get("expression", None))
-                else:
-                    yield from traverse_json(value, context)
-        elif isinstance(data, list):
-            for item in data:
-                yield from traverse_json(item, context)
-
-    def extract_power_bi_metadata_from_json_files(directory_path):
-        """
-        Extracts Power BI metadata from all JSON files in the specified directory.
-
-        Args:
-            directory_path (str): The directory path containing Power BI report JSON files.
-
-        Returns:
-            list: A list of dictionaries, each containing extracted metadata for a single item
-                  (table, column, or measure) from the Power BI reports.
-        """
-
-        # Extract data from all json files in a directory
-        all_rows = []
-        for root, _, files in os.walk(directory_path):
-            for file in files:
-                if file.endswith('.json'):
-                    json_file_path = os.path.join(root, file)
-                    report_name = extract_report_name(json_file_path)
-                    page_name = extract_page_name(json_file_path) or "NA"
-                    try:
-                        with open(json_file_path, 'r', encoding='utf-8') as file:
-                            data = json.load(file)
-                            for table, column, used_in, expression in traverse_json(data):
-                                all_rows.append({"Report": report_name, "Page": page_name, "Table": table, "Column or Measure": column, "Expression": expression, "Used In": used_in})
-                    except (json.JSONDecodeError, IOError) as e:
-                        print(f"Error: Unable to process file {json_file_path}: {str(e)}")
-
-        # Separate rows based on whether they have an "expression" value
-        rows_with_expression = [row for row in all_rows if row['Expression'] is not None]
-        rows_without_expression = [row for row in all_rows if row['Expression'] is None]
-
-        # This step is done to ensure we get table and respective column in single row
-        reformatted_rows = [
-            {
-                "Report": rows_without_expression[i]["Report"],
-                "Page": rows_without_expression[i]["Page"],
-                "Table": rows_without_expression[i]["Table"],
-                "Column or Measure": rows_without_expression[i + 1]["Column or Measure"],
-                "Expression": None,
-                "Used In": rows_without_expression[i]["Used In"]
-            }
-            for i in range(0, len(rows_without_expression), 2)
-            if i + 1 < len(rows_without_expression)
-        ]
-
-        # This step ensures we add expression to the reformatted_rows based on a join to rows_with_expression
-        for row_without in reformatted_rows:
-            for row_with in rows_with_expression:
-                if (row_without['Report'] == row_with['Report'] and
-                    row_without['Table'] == row_with['Table'] and
-                    row_without['Column or Measure'] == row_with['Column or Measure']):
-                    row_without['Expression'] = row_with['Expression']
-                    break  # Stop looking once a match is found
-
-        # Ensure rows_with_expression that were not used anywhere are added to reformatted_rows
-        final_rows = reformatted_rows + [row for row in rows_with_expression if not any(
-            row['Report'] == r['Report'] and
-            row['Table'] == r['Table'] and
-            row['Column or Measure'] == r['Column or Measure'] for r in reformatted_rows)]
-        
-        # Extract distinct rows
-        unique_rows = []
-        seen = set()
-        for row in final_rows:
-            row_tuple = (row['Report'], row['Page'], row['Table'], row['Column or Measure'], row['Expression'], row['Used In'])
-            if row_tuple not in seen:
-                unique_rows.append(row)
-                seen.add(row_tuple)
-        
-        return unique_rows
-    
-    def write_metadata_to_csv(data, csv_output_path):
-        """
-        Writes the extracted Power BI metadata to a CSV file.
-
-        Args:
-            data (list): A list of dictionaries containing the extracted metadata.
-            csv_output_path (str): The output path for the CSV file.
-        """
-        fieldnames = ['Report', 'Page', 'Table', 'Column or Measure', 'Expression', 'Used In']
-        with open(csv_output_path, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(data)
-
-    # Extract metadata and write to CSV
-    metadata = extract_power_bi_metadata_from_json_files(directory_path)
-    write_metadata_to_csv(metadata, csv_output_path)
+    metadata = extract_pbir_component_metadata(directory_path)
+    fieldnames = ['Report', 'Page', 'Table', 'Column or Measure', 'Expression', 'Used In']
+    with open(csv_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(metadata)
