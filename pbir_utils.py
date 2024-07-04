@@ -303,16 +303,29 @@ def extract_page_name(json_path):
         return "NA"
 
 
-def extract_json_values_to_csv(directory_path, csv_output_path):
+def extract_power_bi_metadata_to_csv(directory_path, csv_output_path):
     """
-    Extracts values from JSON files in a directory and writes them to a CSV file.
+    Extracts metadata from Power BI report JSON files (PBIR) in a directory and writes it to a CSV file.
+
+    This function processes JSON files representing Power BI reports, extracting information about
+    tables, columns, measures, their expressions, and where they are used within the report. It
+    handles multiple JSON files in the given directory, consolidating the extracted information
+    into a single CSV output.
 
     Args:
-        directory_path (str): The directory path containing JSON files.
-        csv_output_path (str): The output path for the CSV file.
+        directory_path (str): The directory path containing Power BI report JSON files.
+        csv_output_path (str): The output path for the CSV file containing the extracted metadata.
 
     Returns:
         None
+
+    The resulting CSV file will contain the following columns:
+    - Report: Name of the Power BI report
+    - Page: Name of the page within the report (or "NA" if not applicable)
+    - Table: Name of the table
+    - Column or Measure: Name of the column or measure
+    - Expression: DAX expression for measures (if applicable)
+    - Used In: Context where the item is used (e.g., visual, Drillthrough, Filters, Bookmarks)
     """
     
     def traverse_json(data, context=None):
@@ -351,67 +364,92 @@ def extract_json_values_to_csv(directory_path, csv_output_path):
             for item in data:
                 yield from traverse_json(item, context)
 
-    # Extract data from all json files in a directory
-    all_rows = []
-    for root, _, files in os.walk(directory_path):
-        for file in files:
-            if file.endswith('.json'):
-                json_file_path = os.path.join(root, file)
-                report_name = extract_report_name(json_file_path)
-                page_name = extract_page_name(json_file_path) or "NA"
-                try:
-                    with open(json_file_path, 'r', encoding='utf-8') as file:
-                        data = json.load(file)
-                        for table, column, used_in, expression in traverse_json(data):
-                            all_rows.append({"Report": report_name, "Page": page_name, "Table": table, "Column or Measure": column, "Expression": expression, "Used In": used_in})
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"Error: Unable to process file {json_file_path}: {str(e)}")
+    def extract_power_bi_metadata_from_json_files(directory_path):
+        """
+        Extracts Power BI metadata from all JSON files in the specified directory.
 
-    # Separate rows based on whether they have an "expression" value
-    rows_with_expression = [row for row in all_rows if row['Expression'] is not None]
-    rows_without_expression = [row for row in all_rows if row['Expression'] is None]
+        Args:
+            directory_path (str): The directory path containing Power BI report JSON files.
 
-    # Process rows without expression (now potentially updated with expressions)
-    reformatted_rows = [
-        {
-            "Report": rows_without_expression[i]["Report"],
-            "Page": rows_without_expression[i]["Page"],
-            "Table": rows_without_expression[i]["Table"],
-            "Column or Measure": rows_without_expression[i + 1]["Column or Measure"],
-            "Expression": None,
-            "Used In": rows_without_expression[i]["Used In"]
-        }
-        for i in range(0, len(rows_without_expression), 2)
-        if i + 1 < len(rows_without_expression)
-    ]
+        Returns:
+            list: A list of dictionaries, each containing extracted metadata for a single item
+                  (table, column, or measure) from the Power BI reports.
+        """
 
-    # Update rows without expression with expressions from rows with expression
-    for row_without in reformatted_rows:
-        for row_with in rows_with_expression:
-            if (row_without['Report'] == row_with['Report'] and
-                row_without['Table'] == row_with['Table'] and
-                row_without['Column or Measure'] == row_with['Column or Measure']):
-                row_without['Expression'] = row_with['Expression']
-                break  # Stop looking once a match is found
+        # Extract data from all json files in a directory
+        all_rows = []
+        for root, _, files in os.walk(directory_path):
+            for file in files:
+                if file.endswith('.json'):
+                    json_file_path = os.path.join(root, file)
+                    report_name = extract_report_name(json_file_path)
+                    page_name = extract_page_name(json_file_path) or "NA"
+                    try:
+                        with open(json_file_path, 'r', encoding='utf-8') as file:
+                            data = json.load(file)
+                            for table, column, used_in, expression in traverse_json(data):
+                                all_rows.append({"Report": report_name, "Page": page_name, "Table": table, "Column or Measure": column, "Expression": expression, "Used In": used_in})
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"Error: Unable to process file {json_file_path}: {str(e)}")
 
-    # Ensure rows_with_expression that were not matched are added back
-    final_rows = reformatted_rows + [row for row in rows_with_expression if not any(
-        row['Report'] == r['Report'] and
-        row['Table'] == r['Table'] and
-        row['Column or Measure'] == r['Column or Measure'] for r in reformatted_rows)]
+        # Separate rows based on whether they have an "expression" value
+        rows_with_expression = [row for row in all_rows if row['Expression'] is not None]
+        rows_without_expression = [row for row in all_rows if row['Expression'] is None]
+
+        # This step is done to ensure we get table and respective column in single row
+        reformatted_rows = [
+            {
+                "Report": rows_without_expression[i]["Report"],
+                "Page": rows_without_expression[i]["Page"],
+                "Table": rows_without_expression[i]["Table"],
+                "Column or Measure": rows_without_expression[i + 1]["Column or Measure"],
+                "Expression": None,
+                "Used In": rows_without_expression[i]["Used In"]
+            }
+            for i in range(0, len(rows_without_expression), 2)
+            if i + 1 < len(rows_without_expression)
+        ]
+
+        # This step ensures we add expression to the reformatted_rows based on a join to rows_with_expression
+        for row_without in reformatted_rows:
+            for row_with in rows_with_expression:
+                if (row_without['Report'] == row_with['Report'] and
+                    row_without['Table'] == row_with['Table'] and
+                    row_without['Column or Measure'] == row_with['Column or Measure']):
+                    row_without['Expression'] = row_with['Expression']
+                    break  # Stop looking once a match is found
+
+        # Ensure rows_with_expression that were not used anywhere are added to reformatted_rows
+        final_rows = reformatted_rows + [row for row in rows_with_expression if not any(
+            row['Report'] == r['Report'] and
+            row['Table'] == r['Table'] and
+            row['Column or Measure'] == r['Column or Measure'] for r in reformatted_rows)]
+        
+        # Extract distinct rows
+        unique_rows = []
+        seen = set()
+        for row in final_rows:
+            row_tuple = (row['Report'], row['Page'], row['Table'], row['Column or Measure'], row['Expression'], row['Used In'])
+            if row_tuple not in seen:
+                unique_rows.append(row)
+                seen.add(row_tuple)
+        
+        return unique_rows
     
-    # Extract distinct rows
-    unique_rows = []
-    seen = set()
-    for row in final_rows:
-        row_tuple = (row['Report'], row['Page'], row['Table'], row['Column or Measure'], row['Expression'], row['Used In'])
-        if row_tuple not in seen:
-            unique_rows.append(row)
-            seen.add(row_tuple)
-    
-    # Write to csv
-    with open(csv_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+    def write_metadata_to_csv(data, csv_output_path):
+        """
+        Writes the extracted Power BI metadata to a CSV file.
+
+        Args:
+            data (list): A list of dictionaries containing the extracted metadata.
+            csv_output_path (str): The output path for the CSV file.
+        """
         fieldnames = ['Report', 'Page', 'Table', 'Column or Measure', 'Expression', 'Used In']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(unique_rows)
+        with open(csv_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(data)
+
+    # Extract metadata and write to CSV
+    metadata = extract_power_bi_metadata_from_json_files(directory_path)
+    write_metadata_to_csv(metadata, csv_output_path)
